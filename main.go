@@ -1,0 +1,570 @@
+package main
+
+import (
+	"fmt"
+	"html/template"
+	"log"
+	"mime"
+	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	defaultPort = 2001
+	banner      = `
+███████╗██╗  ██╗ █████╗ ██████╗  ██████╗ ██╗    ██╗███████╗███████╗██████╗ ██╗   ██╗███████╗
+██╔════╝██║  ██║██╔══██╗██╔══██╗██╔═══██╗██║    ██║██╔════╝██╔════╝██╔══██╗██║   ██║██╔════╝
+███████╗███████║███████║██║  ██║██║   ██║██║ █╗ ██║███████╗█████╗  ██████╔╝██║   ██║█████╗  
+╚════██║██╔══██║██╔══██║██║  ██║██║   ██║██║███╗██║╚════██║██╔══╝  ██╔══██╗╚██╗ ██╔╝██╔══╝  
+███████║██║  ██║██║  ██║██████╔╝╚██████╔╝╚███╔███╔╝███████║███████╗██║  ██║ ╚████╔╝ ███████╗
+╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝  ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝`
+)
+
+// FileInfo holds metadata for directory listing
+type FileInfo struct {
+	Name     string
+	IsDir    bool
+	Size     string
+	Modified string
+	FileType string
+	Icon     string
+	Link     string
+}
+
+// TemplateData holds data passed to the HTML template
+type TemplateData struct {
+	Path       string
+	ParentPath string
+	HasParent  bool
+	Files      []FileInfo
+}
+
+var rootDir string
+
+// getIcon returns an appropriate emoji icon based on file type
+func getIcon(name string, isDir bool) string {
+	if isDir {
+		return "📁"
+	}
+
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	// Images
+	case ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp", ".ico":
+		return "🖼️"
+	// Documents
+	case ".pdf":
+		return "📕"
+	case ".doc", ".docx":
+		return "📘"
+	case ".xls", ".xlsx":
+		return "📗"
+	case ".ppt", ".pptx":
+		return "📙"
+	case ".txt", ".md", ".rtf":
+		return "📄"
+	// Code
+	case ".go", ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".rs", ".rb":
+		return "💻"
+	case ".html", ".htm", ".css":
+		return "🌐"
+	case ".json", ".xml", ".yaml", ".yml", ".toml":
+		return "📋"
+	// Archives
+	case ".zip", ".tar", ".gz", ".rar", ".7z":
+		return "📦"
+	// Audio
+	case ".mp3", ".wav", ".flac", ".ogg", ".m4a":
+		return "🎵"
+	// Video
+	case ".mp4", ".mkv", ".avi", ".mov", ".webm":
+		return "🎬"
+	// Executables
+	case ".exe", ".msi", ".dll":
+		return "⚙️"
+	case ".sh", ".bat", ".ps1":
+		return "📜"
+	// Database
+	case ".db", ".sqlite", ".sql":
+		return "🗃️"
+	default:
+		return "📄"
+	}
+}
+
+// getFileType returns a human-readable file type
+func getFileType(name string, isDir bool) string {
+	if isDir {
+		return "Folder"
+	}
+
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext == "" {
+		return "File"
+	}
+	return strings.ToUpper(ext[1:]) + " File"
+}
+
+// formatSize converts bytes to human-readable format
+func formatSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	} else if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	} else if bytes < 1024*1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1f GB", float64(bytes)/(1024*1024*1024))
+}
+
+// getMimeType returns the MIME type for a file, with custom handling for dev files
+func getMimeType(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+
+	// Custom MIME types for common dev files that have wrong defaults
+	customTypes := map[string]string{
+		".mod":  "text/plain", // Go module file (not MOD audio)
+		".sum":  "text/plain", // Go sum file
+		".lock": "text/plain", // Lock files
+		".toml": "text/plain",
+		".yaml": "text/plain",
+		".yml":  "text/plain",
+		".env":  "text/plain",
+		".ini":  "text/plain",
+		".cfg":  "text/plain",
+		".conf": "text/plain",
+		".log":  "text/plain",
+		".md":   "text/plain",
+		".rs":   "text/plain", // Rust
+		".go":   "text/plain",
+		".ts":   "text/plain", // TypeScript (not MPEG-TS)
+		".tsx":  "text/plain",
+		".jsx":  "text/plain",
+		".vue":  "text/plain",
+		".svelte": "text/plain",
+	}
+
+	if mimeType, ok := customTypes[ext]; ok {
+		return mimeType
+	}
+
+	// Fall back to standard MIME type detection
+	mimeType := mime.TypeByExtension(ext)
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	return mimeType
+}
+
+// loggingMiddleware logs HTTP requests in Python http.server style
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Wrap response writer to capture status code
+		wrapped := &responseWriter{ResponseWriter: w, statusCode: 200}
+
+		start := time.Now()
+		next.ServeHTTP(wrapped, r)
+
+		timestamp := start.Format("02/Jan/2006 15:04:05")
+		log.Printf("%s - - [%s] \"%s %s %s\" %d -",
+			r.RemoteAddr,
+			timestamp,
+			r.Method,
+			r.URL.Path,
+			r.Proto,
+			wrapped.statusCode,
+		)
+	})
+}
+
+// responseWriter wraps http.ResponseWriter to capture status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// sanitizePath prevents path traversal attacks
+func sanitizePath(requestPath string) (string, error) {
+	// Clean the path
+	cleaned := filepath.Clean(requestPath)
+
+	// Join with root directory
+	fullPath := filepath.Join(rootDir, cleaned)
+
+	// Ensure the path is still within root directory
+	absRoot, err := filepath.Abs(rootDir)
+	if err != nil {
+		return "", err
+	}
+
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return "", err
+	}
+
+	if !strings.HasPrefix(absPath, absRoot) {
+		return "", fmt.Errorf("path traversal detected")
+	}
+
+	return absPath, nil
+}
+
+// fileHandler handles file serving and directory listing
+func fileHandler(w http.ResponseWriter, r *http.Request) {
+	// Sanitize and validate path
+	safePath, err := sanitizePath(r.URL.Path)
+	if err != nil {
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Get file info
+	info, err := os.Stat(safePath)
+	if os.IsNotExist(err) {
+		http.Error(w, "404 Not Found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// Handle directory listing
+	if info.IsDir() {
+		serveDirectory(w, r, safePath)
+		return
+	}
+
+	// Serve file with correct MIME type
+	serveFile(w, r, safePath)
+}
+
+// serveDirectory renders the directory listing page
+func serveDirectory(w http.ResponseWriter, r *http.Request, dirPath string) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	var files []FileInfo
+
+	// Normalize request path
+	requestPath := r.URL.Path
+	if requestPath == "" {
+		requestPath = "/"
+	}
+
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		size := "-"
+		if !entry.IsDir() {
+			size = formatSize(info.Size())
+		}
+
+		// Build proper link path (trim trailing slash to avoid double slashes)
+		basePath := strings.TrimSuffix(requestPath, "/")
+		var link string
+		if basePath == "" {
+			link = "/" + entry.Name()
+		} else {
+			link = basePath + "/" + entry.Name()
+		}
+		if entry.IsDir() {
+			link += "/"
+		}
+
+		files = append(files, FileInfo{
+			Name:     entry.Name(),
+			IsDir:    entry.IsDir(),
+			Size:     size,
+			Modified: info.ModTime().Format("2006-01-02 15:04:05"),
+			FileType: getFileType(entry.Name(), entry.IsDir()),
+			Icon:     getIcon(entry.Name(), entry.IsDir()),
+			Link:     link,
+		})
+	}
+
+	// Sort: folders first, then alphabetically
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].IsDir != files[j].IsDir {
+			return files[i].IsDir
+		}
+		return strings.ToLower(files[i].Name) < strings.ToLower(files[j].Name)
+	})
+
+	// Determine parent path (use path.Dir for URL paths, not filepath.Dir)
+	hasParent := requestPath != "/" && requestPath != ""
+	parentPath := path.Dir(strings.TrimSuffix(requestPath, "/"))
+	if parentPath == "." {
+		parentPath = "/"
+	}
+
+	data := TemplateData{
+		Path:       requestPath,
+		ParentPath: parentPath,
+		HasParent:  hasParent,
+		Files:      files,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, data); err != nil {
+		http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
+// serveFile serves a file with correct MIME type
+func serveFile(w http.ResponseWriter, r *http.Request, filePath string) {
+	w.Header().Set("Content-Type", getMimeType(filePath))
+	http.ServeFile(w, r, filePath)
+}
+
+// HTML template for directory listing
+var tmpl = template.Must(template.New("listing").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShadowServe - {{.Path}}</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .header {
+            background: linear-gradient(135deg, #007acc 0%, #005a9e 100%);
+            color: white;
+            padding: 20px 30px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        .header h1 {
+            font-size: 1.5em;
+            font-weight: 600;
+        }
+        .header .path {
+            font-family: 'Consolas', 'Monaco', monospace;
+            opacity: 0.9;
+            margin-top: 5px;
+            word-break: break-all;
+        }
+        .breadcrumb {
+            margin-bottom: 20px;
+        }
+        .breadcrumb a {
+            color: #61dafb;
+            text-decoration: none;
+            padding: 8px 16px;
+            background-color: #2d2d2d;
+            border-radius: 5px;
+            display: inline-block;
+            transition: background-color 0.2s;
+        }
+        .breadcrumb a:hover {
+            background-color: #3d3d3d;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background-color: #252525;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        th, td {
+            padding: 15px 20px;
+            text-align: left;
+        }
+        th {
+            background-color: #2d2d2d;
+            color: #61dafb;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85em;
+            letter-spacing: 0.5px;
+        }
+        tr {
+            border-bottom: 1px solid #333;
+            transition: background-color 0.2s;
+        }
+        tr:last-child {
+            border-bottom: none;
+        }
+        tr:hover {
+            background-color: #2a2a2a;
+        }
+        td a {
+            color: #61dafb;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        td a:hover {
+            color: #8be9fd;
+            text-decoration: underline;
+        }
+        .icon {
+            font-size: 1.2em;
+        }
+        .size, .modified, .type {
+            color: #888;
+            font-size: 0.9em;
+        }
+        .empty {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+            th, td {
+                padding: 10px;
+            }
+            .type {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📂 ShadowServe</h1>
+            <div class="path">{{.Path}}</div>
+        </div>
+        
+        {{if .HasParent}}
+        <div class="breadcrumb">
+            <a href="{{.ParentPath}}">⬆️ Parent Directory</a>
+        </div>
+        {{end}}
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th class="type">Type</th>
+                    <th>Size</th>
+                    <th>Modified</th>
+                </tr>
+            </thead>
+            <tbody>
+                {{if not .Files}}
+                <tr>
+                    <td colspan="4" class="empty">This directory is empty</td>
+                </tr>
+                {{end}}
+                {{range .Files}}
+                <tr>
+                    <td>
+                        <a href="{{.Link}}">
+                            <span class="icon">{{.Icon}}</span>
+                            {{.Name}}{{if .IsDir}}/{{end}}
+                        </a>
+                    </td>
+                    <td class="type">{{.FileType}}</td>
+                    <td class="size">{{.Size}}</td>
+                    <td class="modified">{{.Modified}}</td>
+                </tr>
+                {{end}}
+            </tbody>
+        </table>
+    </div>
+</body>
+</html>`))
+
+func main() {
+	// Print banner
+	fmt.Println(banner)
+	fmt.Println()
+
+	// Parse positional arguments
+	port := defaultPort
+	dir := "."
+
+	args := os.Args[1:]
+
+	if len(args) >= 1 {
+		if p, err := strconv.Atoi(args[0]); err == nil {
+			port = p
+		} else {
+			// First arg might be directory if not a number
+			dir = args[0]
+		}
+	}
+
+	if len(args) >= 2 {
+		dir = args[1]
+	}
+
+	// Resolve directory to absolute path
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		log.Fatalf("Error resolving directory path: %v", err)
+	}
+
+	// Verify directory exists
+	info, err := os.Stat(absDir)
+	if os.IsNotExist(err) {
+		log.Fatalf("Directory does not exist: %s", absDir)
+	}
+	if err != nil {
+		log.Fatalf("Error accessing directory: %v", err)
+	}
+	if !info.IsDir() {
+		log.Fatalf("Path is not a directory: %s", absDir)
+	}
+
+	rootDir = absDir
+
+	// Create server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", fileHandler)
+
+	// Wrap with logging middleware
+	handler := loggingMiddleware(mux)
+
+	addr := fmt.Sprintf(":%d", port)
+
+	fmt.Printf("🚀 ShadowServe started!\n")
+	fmt.Printf("📂 Serving:  %s\n", rootDir)
+	fmt.Printf("🌐 Address:  http://localhost%s\n", addr)
+	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+	// Start server
+	if err := http.ListenAndServe(addr, handler); err != nil {
+		log.Fatalf("Server error: %v", err)
+	}
+}

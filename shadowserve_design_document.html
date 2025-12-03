@@ -1,0 +1,134 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>ShadowServe Design Document</title>
+    <style>
+        body {
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            padding: 40px;
+        }
+        h1, h2, h3 {
+            color: #61dafb;
+        }
+        pre {
+            background-color: #2d2d2d;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        code {
+            color: #9cdcfe;
+        }
+        .banner {
+            background-color: #007acc;
+            color: white;
+            padding: 15px;
+            text-align: center;
+            font-size: 1.5em;
+            border-radius: 8px;
+            margin-bottom: 30px;
+        }
+        .log-example {
+            font-family: monospace;
+            color: #dcdcaa;
+        }
+        .log-info { color: #6a9955; }
+        .log-error { color: #f44747; }
+    </style>
+</head>
+<body>
+    <div class="banner">ShadowServe server started!</div>
+
+    <h1>ShadowServe Design Document</h1>
+
+    <h2>1. Overview</h2>
+    <p>ShadowServe is a lightweight, multithreaded HTTP file server executable for Windows. It replicates the functionality of Python’s <code>http.server</code> while enforcing a mandatory dark mode interface and providing console logging of HTTP requests. The server defaults to serving files from the current working directory and listens on port 2001 by default.</p>
+
+    <h2>2. Goals</h2>
+    <ul>
+        <li>Portable executable with no external dependencies.</li>
+        <li>Quick file sharing and directory browsing over HTTP.</li>
+        <li>Multithreaded request handling using Go's goroutines.</li>
+        <li>Mandatory dark mode web interface.</li>
+        <li>Real-time console logging of HTTP requests.</li>
+        <li>Default to current working directory and port 2001.</li>
+    </ul>
+
+    <h2>3. Functional Requirements</h2>
+    <h3>3.1 Core Server Features</h3>
+    <ul>
+        <li>Start server from console: <code>myserver.exe [port] [directory]</code></li>
+        <li>Default port: <strong>2001</strong></li>
+        <li>Default directory: current working directory</li>
+        <li>Serve files with correct MIME types</li>
+        <li>Directory listing with file metadata</li>
+        <li>Downloadable files via browser</li>
+        <li>Path traversal protection</li>
+    </ul>
+
+    <h3>3.2 Concurrency</h3>
+    <p>Uses Go’s goroutines and <code>net/http</code> for multithreaded request handling.</p>
+
+    <h3>3.3 User Interface</h3>
+    <ul>
+        <li>Dark gray/black background</li>
+        <li>Light gray/white text</li>
+        <li>Teal or blue accent links</li>
+        <li>Responsive design for desktop and mobile</li>
+        <li>No theme toggle — dark mode is enforced</li>
+    </ul>
+
+    <h3>3.4 Logging</h3>
+    <p>Console logging of HTTP requests in a format similar to Python’s <code>http.server</code>:</p>
+    <pre class="log-example">
+<span class="log-info">127.0.0.1 - - [03/Dec/2025 14:40:12] "GET /index.html HTTP/1.1" 200 -</span>
+<span class="log-error">127.0.0.1 - - [03/Dec/2025 14:41:00] "GET /missing.txt HTTP/1.1" 404 -</span>
+    </pre>
+
+    <h3>3.5 Configuration Options</h3>
+    <ul>
+        <li><code>--port &lt;number&gt;</code>: specify port (default: 2001)</li>
+        <li><code>--dir &lt;path&gt;</code>: specify directory (default: current working directory)</li>
+    </ul>
+
+    <h2>4. Non-Functional Requirements</h2>
+    <ul>
+        <li>Handle at least 100 concurrent connections</li>
+        <li>Restrict access to served directory</li>
+        <li>Sanitize input to prevent injection attacks</li>
+        <li>Optional HTTPS support in future</li>
+        <li>Single .exe file, no installer required</li>
+        <li>Minimal setup and intuitive UI</li>
+    </ul>
+
+    <h2>5. Technical Design</h2>
+    <ul>
+        <li>Language: Go</li>
+        <li>Libraries: <code>net/http</code>, <code>html/template</code></li>
+        <li>Custom CSS for dark mode</li>
+        <li>Request handler → file or directory listing</li>
+        <li>Logging middleware for console output</li>
+    </ul>
+
+    <h2>6. Future Enhancements</h2>
+    <ul>
+        <li>HTTPS with self-signed certificates</li>
+        <li>File upload support</li>
+        <li>Basic authentication</li>
+        <li>Log to file in addition to console</li>
+        <li>Customizable dark mode accents</li>
+    </ul>
+
+    <h2>7. Risks & Limitations</h2>
+    <ul>
+        <li>Not intended for production use</li>
+        <li>Large file transfers limited by bandwidth</li>
+        <li>Verbose logging under heavy load</li>
+    </ul>
+</body>
+</html>
