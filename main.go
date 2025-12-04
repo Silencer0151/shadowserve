@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"html/template"
+	"io"
 	"log"
 	"mime"
 	"net/http"
@@ -129,24 +130,24 @@ func getMimeType(filename string) string {
 
 	// Custom MIME types for common dev files that have wrong defaults
 	customTypes := map[string]string{
-		".mod":  "text/plain", // Go module file (not MOD audio)
-		".sum":  "text/plain", // Go sum file
-		".lock": "text/plain", // Lock files
-		".toml": "text/plain",
-		".yaml": "text/plain",
-		".yml":  "text/plain",
-		".env":  "text/plain",
-		".ini":  "text/plain",
-		".cfg":  "text/plain",
-		".conf": "text/plain",
-		".log":  "text/plain",
-		".md":   "text/plain",
-		".rs":   "text/plain", // Rust
-		".go":   "text/plain",
-		".ts":   "text/plain", // TypeScript (not MPEG-TS)
-		".tsx":  "text/plain",
-		".jsx":  "text/plain",
-		".vue":  "text/plain",
+		".mod":    "text/plain", // Go module file (not MOD audio)
+		".sum":    "text/plain", // Go sum file
+		".lock":   "text/plain", // Lock files
+		".toml":   "text/plain",
+		".yaml":   "text/plain",
+		".yml":    "text/plain",
+		".env":    "text/plain",
+		".ini":    "text/plain",
+		".cfg":    "text/plain",
+		".conf":   "text/plain",
+		".log":    "text/plain",
+		".md":     "text/plain",
+		".rs":     "text/plain", // Rust
+		".go":     "text/plain",
+		".ts":     "text/plain", // TypeScript (not MPEG-TS)
+		".tsx":    "text/plain",
+		".jsx":    "text/plain",
+		".vue":    "text/plain",
 		".svelte": "text/plain",
 	}
 
@@ -456,6 +457,21 @@ var tmpl = template.Must(template.New("listing").Parse(`<!DOCTYPE html>
                 display: none;
             }
         }
+		.upload-section {
+			margin-bottom: 20px;
+		}
+		.upload-btn {
+			display: inline-block;
+			padding: 10px 20px;
+			background-color: #2d7d46;
+			color: white;
+			border-radius: 5px;
+			cursor: pointer;
+			transition: background-color 0.2s;
+		}
+		.upload-btn:hover {
+			background-color: #3a9d59;
+		}
     </style>
 </head>
 <body>
@@ -471,6 +487,16 @@ var tmpl = template.Must(template.New("listing").Parse(`<!DOCTYPE html>
         </div>
         {{end}}
         
+		<div class="upload-section">
+			<form action="/_upload" method="POST" enctype="multipart/form-data">
+				<input type="hidden" name="dir" value="{{.Path}}">
+				<label class="upload-btn">
+					📤 Upload File
+					<input type="file" name="file" onchange="this.form.submit()" hidden>
+				</label>
+			</form>
+		</div>
+
         <table>
             <thead>
                 <tr>
@@ -504,6 +530,66 @@ var tmpl = template.Must(template.New("listing").Parse(`<!DOCTYPE html>
     </div>
 </body>
 </html>`))
+
+// upload handler to upload files to current directory
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed ;[", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse multipart form (32 MB max in memory, rest goes to temp files)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "Failed to parse upload", http.StatusBadRequest)
+		return
+	}
+
+	// Get the target directory from the form
+	targetDir := r.FormValue("dir")
+	if targetDir == "" {
+		targetDir = "/"
+	}
+
+	// Sanitize and validate target directory
+	safePath, err := sanitizePath(targetDir)
+	if err != nil {
+		http.Error(w, "Invalid directory", http.StatusForbidden)
+		return
+	}
+
+	// Get the uploaded file
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "No file uploaded", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Sanitize filename (remove path components)
+	filename := filepath.Base(header.Filename)
+	if filename == "." || filename == ".." {
+		http.Error(w, "Invalid filename", http.StatusBadRequest)
+		return
+	}
+
+	// Create the destination file
+	destPath := filepath.Join(safePath, filename)
+	dst, err := os.Create(destPath)
+	if err != nil {
+		http.Error(w, "Failed to create file", http.StatusInternalServerError)
+		return
+	}
+	defer dst.Close()
+
+	// Copy the uploaded file
+	if _, err := io.Copy(dst, file); err != nil {
+		http.Error(w, "Failed to save file", http.StatusInternalServerError)
+		return
+	}
+
+	// Redirect back to the directory
+	http.Redirect(w, r, targetDir, http.StatusSeeOther)
+}
 
 func main() {
 	// Print banner
@@ -552,6 +638,7 @@ func main() {
 	// Create server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", fileHandler)
+	mux.HandleFunc("/_upload", uploadHandler)
 
 	// Wrap with logging middleware
 	handler := loggingMiddleware(mux)
