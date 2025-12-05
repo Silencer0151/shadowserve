@@ -113,6 +113,184 @@ func generateSelfSignedCert() (tls.Certificate, string, error) {
 	return tlsCert, fpStr.String(), nil
 }
 
+// generate pin cryptographicall random 6-digit pin
+func generatePIN() (string, error) {
+	max := big.NewInt(1000000)
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+
+// gen sesseion secret creates a random secret for cookies
+func generateSessionSecret() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", bytes), nil
+}
+
+// hashForCookie creates a hash for the session cookie
+func hashForCookie(pin string) string {
+	h := sha256.Sum256([]byte(pin + sessionSecret))
+	return fmt.Sprintf("%x", h)
+}
+
+// isAuthenticated checks if the request has a valid session cookie
+func isAuthenticated(r *http.Request) bool {
+	cookie, err := r.Cookie("shadowserve_session")
+	if err != nil {
+		return false
+	}
+	return cookie.Value == hashForCookie(serverPIN)
+}
+
+// authMiddleware wraps handlers to require PIN authentication
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Allow access to login page
+		if r.URL.Path == "/_login" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		if !isAuthenticated(r) {
+			http.Redirect(w, r, "/_login", http.StatusSeeOther)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// loginHandler serves the PIN entry page and validates submissions
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		pin := r.FormValue("pin")
+		if pin == serverPIN {
+			// Set session cookie
+			http.SetCookie(w, &http.Cookie{
+				Name:     "shadowserve_session",
+				Value:    hashForCookie(serverPIN),
+				Path:     "/",
+				HttpOnly: true,
+				Secure:   true,
+				SameSite: http.SameSiteStrictMode,
+			})
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		// Wrong PIN - show error
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		loginTmpl.Execute(w, map[string]interface{}{"Error": true})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	loginTmpl.Execute(w, nil)
+}
+
+var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShadowServe - Login</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-box {
+            background-color: #252525;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            max-width: 350px;
+            width: 90%;
+        }
+        .login-box h1 {
+            color: #61dafb;
+            margin-bottom: 10px;
+            font-size: 1.8em;
+        }
+        .login-box p {
+            color: #888;
+            margin-bottom: 25px;
+        }
+        .pin-input {
+            width: 100%;
+            padding: 15px;
+            font-size: 24px;
+            text-align: center;
+            letter-spacing: 8px;
+            background-color: #1a1a1a;
+            border: 2px solid #333;
+            border-radius: 5px;
+            color: #e0e0e0;
+            margin-bottom: 20px;
+        }
+        .pin-input:focus {
+            outline: none;
+            border-color: #61dafb;
+        }
+        .pin-input::placeholder {
+            letter-spacing: normal;
+            font-size: 16px;
+        }
+        .submit-btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #007acc 0%, #005a9e 100%);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .submit-btn:hover {
+            opacity: 0.9;
+        }
+        .error {
+            background-color: #5c1a1a;
+            color: #ff6b6b;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-box">
+        <h1>🔒 ShadowServe</h1>
+        <p>Enter PIN to access files</p>
+        {{if .Error}}
+        <div class="error">Invalid PIN. Please try again.</div>
+        {{end}}
+        <form method="POST">
+            <input type="text" name="pin" class="pin-input" 
+                   placeholder="000000" maxlength="6" pattern="[0-9]{6}" 
+                   inputmode="numeric" autocomplete="off" autofocus required>
+            <button type="submit" class="submit-btn">Enter</button>
+        </form>
+    </div>
+</body>
+</html>`))
+
 // FileInfo holds metadata for directory listing
 type FileInfo struct {
 	Name     string
@@ -132,7 +310,11 @@ type TemplateData struct {
 	Files      []FileInfo
 }
 
-var rootDir string
+var (
+	rootDir       string
+	serverPIN     string
+	sessionSecret string
+)
 
 // getIcon returns an appropriate emoji icon based on file type
 func getIcon(name string, isDir bool) string {
@@ -729,12 +911,23 @@ func main() {
 
 	rootDir = absDir
 
+	// Generate PIN and session secret
+	serverPIN, err = generatePIN()
+	if err != nil {
+		log.Fatalf("Failed to generate PIN: %v", err)
+	}
+	sessionSecret, err = generateSessionSecret()
+	if err != nil {
+		log.Fatalf("Failed to generate session secret: %v", err)
+	}
+
 	// Create server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", fileHandler)
+	mux.HandleFunc("/_login", loginHandler)
 
-	// Wrap with logging middleware
-	handler := loggingMiddleware(mux)
+	// Wrap with auth then logging middleware
+	handler := loggingMiddleware(authMiddleware(mux))
 
 	addr := fmt.Sprintf(":%d", port)
 
@@ -753,6 +946,8 @@ func main() {
 		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 		fmt.Printf("🔑 Certificate Fingerprint (SHA-256):\n")
 		fmt.Printf("   %s\n", fingerprint)
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("🔐 Access PIN: %s\n", serverPIN)
 		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 		// Configure TLS
@@ -773,6 +968,8 @@ func main() {
 	} else {
 		fmt.Printf("🔓 Mode:     HTTP (unencrypted)\n")
 		fmt.Printf("🌐 Address:  http://localhost%s\n", addr)
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("🔐 Access PIN: %s\n", serverPIN)
 		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
 		if err := http.ListenAndServe(addr, handler); err != nil {
