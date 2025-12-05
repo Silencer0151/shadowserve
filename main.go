@@ -82,9 +82,9 @@ func generateSelfSignedCert() (tls.Certificate, string, error) {
 		return tls.Certificate{}, "", fmt.Errorf("failed to generate private key: %v", err)
 	}
 
-	// Certificate valid for 24 hours
+	// Certificate valid for 15 days
 	notBefore := time.Now()
-	notAfter := notBefore.Add(24 * time.Hour)
+	notAfter := notBefore.Add(360 * time.Hour)
 
 	// Generate serial number
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
