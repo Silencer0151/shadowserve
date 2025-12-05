@@ -1,11 +1,21 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"html/template"
 	"io"
 	"log"
+	"math/big"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -26,6 +36,82 @@ const (
 ███████║██║  ██║██║  ██║██████╔╝╚██████╔╝╚███╔███╔╝███████║███████╗██║  ██║ ╚████╔╝ ███████╗
 ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝  ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝`
 )
+
+// generateSelfSignedCert creates an in-memory self-signed TLS certificate
+func generateSelfSignedCert() (tls.Certificate, string, error) {
+	// Generate ECDSA P-256 key
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("failed to generate private key: %v", err)
+	}
+
+	// Certificate valid for 24 hours
+	notBefore := time.Now()
+	notAfter := notBefore.Add(24 * time.Hour)
+
+	// Generate serial number
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("failed to generate serial number: %v", err)
+	}
+
+	// Build certificate template
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"ShadowServe"},
+			CommonName:   "ShadowServe Local Server ;)",
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+
+	// Add local network IPs
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, addr := range addrs {
+			if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+				template.IPAddresses = append(template.IPAddresses, ipNet.IP)
+			}
+		}
+	}
+
+	// Create certificate
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("failed to create certificate: %v", err)
+	}
+
+	// Encode to PEM
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(privateKey)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("failed to marshal private key: %v", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	// Parse into tls.Certificate
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return tls.Certificate{}, "", fmt.Errorf("failed to parse certificate: %v", err)
+	}
+
+	// Calculate SHA-256 fingerprint
+	fingerprint := sha256.Sum256(certDER)
+	var fpStr strings.Builder
+	for i, b := range fingerprint {
+		if i > 0 {
+			fpStr.WriteString(":")
+		}
+		fpStr.WriteString(fmt.Sprintf("%02X", b))
+	}
+
+	return tlsCert, fpStr.String(), nil
+}
 
 // FileInfo holds metadata for directory listing
 type FileInfo struct {
@@ -596,23 +682,31 @@ func main() {
 	fmt.Println(banner)
 	fmt.Println()
 
-	// Parse positional arguments
+	// Parse arguments
 	port := defaultPort
 	dir := "."
+	useTLS := false
 
-	args := os.Args[1:]
-
-	if len(args) >= 1 {
-		if p, err := strconv.Atoi(args[0]); err == nil {
-			port = p
+	// Filter out --tls flag and parse positional args
+	var positionalArgs []string
+	for _, arg := range os.Args[1:] {
+		if arg == "--tls" {
+			useTLS = true
 		} else {
-			// First arg might be directory if not a number
-			dir = args[0]
+			positionalArgs = append(positionalArgs, arg)
 		}
 	}
 
-	if len(args) >= 2 {
-		dir = args[1]
+	if len(positionalArgs) >= 1 {
+		if p, err := strconv.Atoi(positionalArgs[0]); err == nil {
+			port = p
+		} else {
+			dir = positionalArgs[0]
+		}
+	}
+
+	if len(positionalArgs) >= 2 {
+		dir = positionalArgs[1]
 	}
 
 	// Resolve directory to absolute path
@@ -638,7 +732,6 @@ func main() {
 	// Create server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", fileHandler)
-	mux.HandleFunc("/_upload", uploadHandler)
 
 	// Wrap with logging middleware
 	handler := loggingMiddleware(mux)
@@ -647,11 +740,43 @@ func main() {
 
 	fmt.Printf("🚀 ShadowServe started!\n")
 	fmt.Printf("📂 Serving:  %s\n", rootDir)
-	fmt.Printf("🌐 Address:  http://localhost%s\n", addr)
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
-	// Start server
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Fatalf("Server error: %v", err)
+	if useTLS {
+		// Generate self-signed certificate
+		cert, fingerprint, err := generateSelfSignedCert()
+		if err != nil {
+			log.Fatalf("Failed to generate TLS certificate: %v", err)
+		}
+
+		fmt.Printf("🔒 Mode:     HTTPS (TLS)\n")
+		fmt.Printf("🌐 Address:  https://localhost%s\n", addr)
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+		fmt.Printf("🔑 Certificate Fingerprint (SHA-256):\n")
+		fmt.Printf("   %s\n", fingerprint)
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+		// Configure TLS
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+
+		server := &http.Server{
+			Addr:      addr,
+			Handler:   handler,
+			TLSConfig: tlsConfig,
+		}
+
+		if err := server.ListenAndServeTLS("", ""); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
+	} else {
+		fmt.Printf("🔓 Mode:     HTTP (unencrypted)\n")
+		fmt.Printf("🌐 Address:  http://localhost%s\n", addr)
+		fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+
+		if err := http.ListenAndServe(addr, handler); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
 	}
 }
