@@ -275,6 +275,85 @@ func authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// ipInfoHandler returns information about the requesting client's IP
+func ipInfoHandler(w http.ResponseWriter, r *http.Request) {
+	clientIP := getClientIP(r)
+
+	log.Printf("🔍 IP LOOKUP: %s requested their info", clientIP)
+
+	info := map[string]interface{}{
+		"ip": clientIP,
+	}
+
+	// Reverse DNS lookup
+	if names, err := net.LookupAddr(clientIP); err == nil && len(names) > 0 {
+		info["hostname"] = strings.TrimSuffix(names[0], ".")
+	} else {
+		info["hostname"] = nil
+	}
+
+	// Fetch geo data from ip-api.com
+	geoData := fetchIPGeoData(clientIP)
+	for k, v := range geoData {
+		info[k] = v
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
+}
+
+// fetchIPGeoData retrieves geolocation data from ip-api.com
+func fetchIPGeoData(ip string) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	url := fmt.Sprintf("http://ip-api.com/json/%s?fields=status,message,country,countryCode,region,regionName,city,zip,lat,lon,timezone,isp,org,as,asname,mobile,proxy,hosting", ip)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		result["geo_error"] = "Failed to fetch geo data"
+		return result
+	}
+	defer resp.Body.Close()
+
+	var data map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		result["geo_error"] = "Failed to parse geo data"
+		return result
+	}
+
+	if status, ok := data["status"].(string); ok && status == "fail" {
+		result["geo_error"] = data["message"]
+		return result
+	}
+
+	result["country"] = data["country"]
+	result["country_code"] = data["countryCode"]
+	result["region"] = data["regionName"]
+	result["region_code"] = data["region"]
+	result["city"] = data["city"]
+	result["zip"] = data["zip"]
+	result["latitude"] = data["lat"]
+	result["longitude"] = data["lon"]
+	result["timezone"] = data["timezone"]
+	result["isp"] = data["isp"]
+	result["org"] = data["org"]
+	result["as_number"] = data["as"]
+	result["as_name"] = data["asname"]
+
+	networkType := "residential"
+	if mobile, ok := data["mobile"].(bool); ok && mobile {
+		networkType = "mobile"
+	} else if hosting, ok := data["hosting"].(bool); ok && hosting {
+		networkType = "hosting/datacenter"
+	} else if proxy, ok := data["proxy"].(bool); ok && proxy {
+		networkType = "proxy/vpn"
+	}
+	result["network_type"] = networkType
+
+	return result
+}
+
 // loginHandler serves the PIN entry page and validates submissions
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	clientIP := getClientIP(r)
@@ -1130,6 +1209,7 @@ func main() {
 	mux.HandleFunc("/_login", loginHandler)
 	mux.HandleFunc("/_upload", uploadHandler)
 	mux.HandleFunc("/_api/status", apiStatusHandler)
+	mux.HandleFunc("/_api/ipinfo", ipInfoHandler)
 
 	// Wrap with auth then logging middleware
 	handler := loggingMiddleware(headerMiddleware(authMiddleware(mux)))
