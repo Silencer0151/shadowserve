@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,39 @@ const (
 ╚════██║██╔══██║██╔══██║██║  ██║██║   ██║██║███╗██║╚════██║██╔══╝  ██╔══██╗╚██╗ ██╔╝██╔══╝  
 ███████║██║  ██║██║  ██║██████╔╝╚██████╔╝╚███╔███╔╝███████║███████╗██║  ██║ ╚████╔╝ ███████╗
 ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝  ╚═════╝  ╚══╝╚══╝ ╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝`
+)
+
+// FileInfo holds metadata for directory listing
+type FileInfo struct {
+	Name     string
+	IsDir    bool
+	Size     string
+	Modified string
+	FileType string
+	Icon     string
+	Link     string
+}
+
+// TemplateData holds data passed to the HTML template
+type TemplateData struct {
+	Path       string
+	ParentPath string
+	HasParent  bool
+	Files      []FileInfo
+}
+
+var (
+	rootDir       string
+	serverPIN     string
+	sessionSecret string
+
+	// visitor tracking
+	visitorsMu sync.RWMutex
+	visitors   = make(map[string]bool)
+
+	// failed login attempt tracking
+	failedAttemptsMu sync.Mutex
+	failedAttempts   = make(map[string]int)
 )
 
 // generateSelfSignedCert creates an in-memory self-signed TLS certificate
@@ -132,6 +166,64 @@ func generateSessionSecret() (string, error) {
 	return fmt.Sprintf("%x", bytes), nil
 }
 
+// getClientIP extracts the client IP from the request
+func getClientIP(r *http.Request) string {
+	// Check X-Forwarded-For header first (if behind proxy)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+
+	// Fall back to RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// checkNewVisitor logs if this is a new visitor and returns whether they're new
+func checkNewVisitor(ip string) bool {
+	visitorsMu.Lock()
+	defer visitorsMu.Unlock()
+
+	if !visitors[ip] {
+		visitors[ip] = true
+		log.Printf("👋 NEW VISITOR: %s", ip)
+		return true
+	}
+	return false
+}
+
+// recordFailedAttempt increments failed login attempts for an IP
+func recordFailedAttempt(ip string) int {
+	failedAttemptsMu.Lock()
+	defer failedAttemptsMu.Unlock()
+
+	failedAttempts[ip]++
+	return failedAttempts[ip]
+}
+
+// clearFailedAttempts resets failed login attempts for an IP
+func clearFailedAttempts(ip string) {
+	failedAttemptsMu.Lock()
+	defer failedAttemptsMu.Unlock()
+
+	delete(failedAttempts, ip)
+}
+
+// formatBytes converts bytes to human-readable format for logging
+func formatBytes(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	} else if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	} else if bytes < 1024*1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1f GB", float64(bytes)/(1024*1024*1024))
+}
+
 // hashForCookie creates a hash for the session cookie
 func hashForCookie(pin string) string {
 	h := sha256.Sum256([]byte(pin + sessionSecret))
@@ -167,9 +259,16 @@ func authMiddleware(next http.Handler) http.Handler {
 
 // loginHandler serves the PIN entry page and validates submissions
 func loginHandler(w http.ResponseWriter, r *http.Request) {
+	clientIP := getClientIP(r)
+	checkNewVisitor(clientIP)
+
 	if r.Method == http.MethodPost {
 		pin := r.FormValue("pin")
 		if pin == serverPIN {
+			// Clear failed attempts on success
+			clearFailedAttempts(clientIP)
+			log.Printf("🔓 LOGIN SUCCESS: %s", clientIP)
+
 			// Set session cookie
 			http.SetCookie(w, &http.Cookie{
 				Name:     "shadowserve_session",
@@ -182,7 +281,11 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-		// Wrong PIN - show error
+
+		// Wrong PIN
+		attempts := recordFailedAttempt(clientIP)
+		log.Printf("❌ LOGIN FAILED: %s (attempt %d)", clientIP, attempts)
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		loginTmpl.Execute(w, map[string]interface{}{"Error": true})
 		return
@@ -290,31 +393,6 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
     </div>
 </body>
 </html>`))
-
-// FileInfo holds metadata for directory listing
-type FileInfo struct {
-	Name     string
-	IsDir    bool
-	Size     string
-	Modified string
-	FileType string
-	Icon     string
-	Link     string
-}
-
-// TemplateData holds data passed to the HTML template
-type TemplateData struct {
-	Path       string
-	ParentPath string
-	HasParent  bool
-	Files      []FileInfo
-}
-
-var (
-	rootDir       string
-	serverPIN     string
-	sessionSecret string
-)
 
 // getIcon returns an appropriate emoji icon based on file type
 func getIcon(name string, isDir bool) string {
@@ -491,9 +569,12 @@ func sanitizePath(requestPath string) (string, error) {
 
 // fileHandler handles file serving and directory listing
 func fileHandler(w http.ResponseWriter, r *http.Request) {
+	clientIP := getClientIP(r)
+
 	// Sanitize and validate path
 	safePath, err := sanitizePath(r.URL.Path)
 	if err != nil {
+		log.Printf("🚫 PATH TRAVERSAL BLOCKED: %s tried %s", clientIP, r.URL.Path)
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
@@ -514,6 +595,9 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 		serveDirectory(w, r, safePath)
 		return
 	}
+
+	// Log file download
+	log.Printf("📥 DOWNLOAD: %s (%s) → %s", r.URL.Path, formatBytes(info.Size()), clientIP)
 
 	// Serve file with correct MIME type
 	serveFile(w, r, safePath)
@@ -755,15 +839,15 @@ var tmpl = template.Must(template.New("listing").Parse(`<!DOCTYPE html>
         </div>
         {{end}}
         
-		<div class="upload-section">
-			<form action="/_upload" method="POST" enctype="multipart/form-data">
-				<input type="hidden" name="dir" value="{{.Path}}">
-				<label class="upload-btn">
-					📤 Upload File
-					<input type="file" name="file" onchange="this.form.submit()" hidden>
-				</label>
-			</form>
-		</div>
+        <div class="upload-section">
+            <form action="/_upload" method="POST" enctype="multipart/form-data">
+                <input type="hidden" name="dir" value="{{.Path}}">
+                <label class="upload-btn">
+                    📤 Upload File
+                    <input type="file" name="file" onchange="this.form.submit()" hidden>
+                </label>
+            </form>
+        </div>
 
         <table>
             <thead>
@@ -799,15 +883,18 @@ var tmpl = template.Must(template.New("listing").Parse(`<!DOCTYPE html>
 </body>
 </html>`))
 
-// upload handler to upload files to current directory
+// uploadHandler handles file uploads to the current directory
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
+	clientIP := getClientIP(r)
+
 	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed ;[", http.StatusMethodNotAllowed)
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	// Parse multipart form (32 MB max in memory, rest goes to temp files)
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		log.Printf("🚫 INVALID REQUEST: %s - failed to parse upload", clientIP)
 		http.Error(w, "Failed to parse upload", http.StatusBadRequest)
 		return
 	}
@@ -821,6 +908,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// Sanitize and validate target directory
 	safePath, err := sanitizePath(targetDir)
 	if err != nil {
+		log.Printf("🚫 PATH TRAVERSAL BLOCKED: %s tried uploading to %s", clientIP, targetDir)
 		http.Error(w, "Invalid directory", http.StatusForbidden)
 		return
 	}
@@ -828,6 +916,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// Get the uploaded file
 	file, header, err := r.FormFile("file")
 	if err != nil {
+		log.Printf("🚫 INVALID REQUEST: %s - no file in upload", clientIP)
 		http.Error(w, "No file uploaded", http.StatusBadRequest)
 		return
 	}
@@ -836,6 +925,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// Sanitize filename (remove path components)
 	filename := filepath.Base(header.Filename)
 	if filename == "." || filename == ".." {
+		log.Printf("🚫 INVALID REQUEST: %s - invalid filename: %s", clientIP, header.Filename)
 		http.Error(w, "Invalid filename", http.StatusBadRequest)
 		return
 	}
@@ -849,14 +939,59 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer dst.Close()
 
-	// Copy the uploaded file
-	if _, err := io.Copy(dst, file); err != nil {
+	// Copy the uploaded file and track size
+	written, err := io.Copy(dst, file)
+	if err != nil {
 		http.Error(w, "Failed to save file", http.StatusInternalServerError)
 		return
 	}
 
+	log.Printf("📤 UPLOAD: %s (%s) ← %s", path.Join(targetDir, filename), formatBytes(written), clientIP)
+
 	// Redirect back to the directory
 	http.Redirect(w, r, targetDir, http.StatusSeeOther)
+}
+
+// tlsListener wraps a net.Listener to log TLS handshake failures
+type tlsListener struct {
+	net.Listener
+}
+
+func (l *tlsListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap connection to detect TLS failures
+	return &tlsConn{Conn: conn}, nil
+}
+
+type tlsConn struct {
+	net.Conn
+	handshakeLogged bool
+}
+
+func (c *tlsConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+
+	// Log potential non-TLS connections (plain HTTP hitting HTTPS port)
+	if !c.handshakeLogged && n > 0 {
+		c.handshakeLogged = true
+		// Check for HTTP methods at start of connection (indicates non-TLS)
+		if n >= 3 {
+			start := strings.ToUpper(string(b[:min(n, 10)]))
+			if strings.HasPrefix(start, "GET ") ||
+				strings.HasPrefix(start, "POST ") ||
+				strings.HasPrefix(start, "HEAD ") ||
+				strings.HasPrefix(start, "PUT ") {
+				clientIP, _, _ := net.SplitHostPort(c.Conn.RemoteAddr().String())
+				log.Printf("⚠️  TLS HANDSHAKE FAILED: %s - plain HTTP on HTTPS port", clientIP)
+			}
+		}
+	}
+
+	return n, err
 }
 
 func main() {
@@ -957,13 +1092,21 @@ func main() {
 			MinVersion:   tls.VersionTLS12,
 		}
 
+		// Create base listener
+		baseListener, err := net.Listen("tcp", addr)
+		if err != nil {
+			log.Fatalf("Failed to create listener: %v", err)
+		}
+
+		// Wrap with TLS
+		tlsWrappedListener := tls.NewListener(&tlsListener{baseListener}, tlsConfig)
+
 		server := &http.Server{
-			Addr:      addr,
 			Handler:   handler,
 			TLSConfig: tlsConfig,
 		}
 
-		if err := server.ListenAndServeTLS("", ""); err != nil {
+		if err := server.Serve(tlsWrappedListener); err != nil {
 			log.Fatalf("Server error: %v", err)
 		}
 	} else {
