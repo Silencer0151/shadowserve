@@ -242,6 +242,21 @@ func isAuthenticated(r *http.Request) bool {
 // authMiddleware wraps handlers to require PIN authentication
 func authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clientIP := getClientIP(r)
+		rawPath := r.URL.Path
+		rawURI := r.RequestURI
+
+		// Check for traversal attempts FIRST - before auth redirect
+		if strings.Contains(rawPath, "..") ||
+			strings.Contains(rawURI, "..") ||
+			strings.Contains(strings.ToLower(rawURI), "%2e%2e") ||
+			strings.Contains(strings.ToLower(rawURI), "%2e.") ||
+			strings.Contains(strings.ToLower(rawURI), ".%2e") {
+			log.Printf("🚫 PATH TRAVERSAL BLOCKED: %s tried %s", clientIP, rawURI)
+			http.Error(w, "403 Forbidden", http.StatusForbidden)
+			return
+		}
+
 		// Allow access to login page
 		if r.URL.Path == "/_login" {
 			next.ServeHTTP(w, r)
@@ -570,11 +585,32 @@ func sanitizePath(requestPath string) (string, error) {
 // fileHandler handles file serving and directory listing
 func fileHandler(w http.ResponseWriter, r *http.Request) {
 	clientIP := getClientIP(r)
+	rawPath := r.URL.Path
+	rawURI := r.RequestURI
+
+	// Check for traversal attempts - check both path and raw URI
+	// Also check URL-encoded variants (%2e = '.')
+	if strings.Contains(rawPath, "..") ||
+		strings.Contains(rawURI, "..") ||
+		strings.Contains(strings.ToLower(rawURI), "%2e%2e") ||
+		strings.Contains(strings.ToLower(rawURI), "%2e.") ||
+		strings.Contains(strings.ToLower(rawURI), ".%2e") {
+		log.Printf("🚫 PATH TRAVERSAL BLOCKED: %s tried %s", clientIP, rawURI)
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Check for traversal attempts in raw path BEFORE cleaning
+	if strings.Contains(rawPath, "..") {
+		log.Printf("🚫 PATH TRAVERSAL BLOCKED: %s tried %s", clientIP, rawPath)
+		http.Error(w, "403 Forbidden", http.StatusForbidden)
+		return
+	}
 
 	// Sanitize and validate path
-	safePath, err := sanitizePath(r.URL.Path)
+	safePath, err := sanitizePath(rawPath)
 	if err != nil {
-		log.Printf("🚫 PATH TRAVERSAL BLOCKED: %s tried %s", clientIP, r.URL.Path)
+		log.Printf("🚫 PATH ACCESS DENIED: %s tried %s", clientIP, rawPath)
 		http.Error(w, "403 Forbidden", http.StatusForbidden)
 		return
 	}
@@ -597,7 +633,7 @@ func fileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Log file download
-	log.Printf("📥 DOWNLOAD: %s (%s) → %s", r.URL.Path, formatBytes(info.Size()), clientIP)
+	log.Printf("📥 DOWNLOAD: %s (%s) → %s", rawPath, formatBytes(info.Size()), clientIP)
 
 	// Serve file with correct MIME type
 	serveFile(w, r, safePath)
