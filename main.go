@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"html/template"
@@ -29,6 +30,7 @@ import (
 
 const (
 	defaultPort = 2001
+	version     = "1.0.0"
 	banner      = `
 ███████╗██╗  ██╗ █████╗ ██████╗  ██████╗ ██╗    ██╗███████╗███████╗██████╗ ██╗   ██╗███████╗
 ██╔════╝██║  ██║██╔══██╗██╔══██╗██╔═══██╗██║    ██║██╔════╝██╔════╝██╔══██╗██║   ██║██╔════╝
@@ -61,6 +63,7 @@ var (
 	rootDir       string
 	serverPIN     string
 	sessionSecret string
+	startTime     time.Time
 
 	// visitor tracking
 	visitorsMu sync.RWMutex
@@ -257,8 +260,8 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Allow access to login page
-		if r.URL.Path == "/_login" {
+		// Allow access to login page and API routes (POTENTIAL SECURITY ISSUE)
+		if r.URL.Path == "/_login" || strings.HasPrefix(r.URL.Path, "/_api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -308,6 +311,24 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	loginTmpl.Execute(w, nil)
+}
+
+// apiStatusHandler returns server status as JSON
+func apiStatusHandler(w http.ResponseWriter, r *http.Request) {
+	visitorsMu.RLock()
+	visitorCount := len(visitors)
+	visitorsMu.RUnlock()
+
+	status := map[string]interface{}{
+		"server":   "ShadowServe",
+		"tagline":  "Underground filesharing for everyone!",
+		"version":  version,
+		"uptime":   time.Since(startTime).String(),
+		"visitors": visitorCount,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
@@ -554,6 +575,15 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// headerMiddleware adds custom server headers to all responses
+func headerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Server", "ShadowServe")
+		w.Header().Set("X-Powered-By", "ShadowServe - Underground filesharing for everyone!")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // sanitizePath prevents path traversal attacks
@@ -1035,6 +1065,8 @@ func main() {
 	fmt.Println(banner)
 	fmt.Println()
 
+	startTime = time.Now()
+
 	// Parse arguments
 	port := defaultPort
 	dir := "."
@@ -1097,9 +1129,10 @@ func main() {
 	mux.HandleFunc("/", fileHandler)
 	mux.HandleFunc("/_login", loginHandler)
 	mux.HandleFunc("/_upload", uploadHandler)
+	mux.HandleFunc("/_api/status", apiStatusHandler)
 
 	// Wrap with auth then logging middleware
-	handler := loggingMiddleware(authMiddleware(mux))
+	handler := loggingMiddleware(headerMiddleware(authMiddleware(mux)))
 
 	addr := fmt.Sprintf(":%d", port)
 
