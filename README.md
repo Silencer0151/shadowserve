@@ -8,3 +8,6 @@
 
 ## Custom port and directory
 ./shadowserve 8080 /path/to/share
+
+## Optional TLS (self signed cert)
+.\shadowserve.exe --tls
