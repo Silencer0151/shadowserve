@@ -925,6 +925,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", fileHandler)
 	mux.HandleFunc("/_login", loginHandler)
+	mux.HandleFunc("/_upload", uploadHandler)
 
 	// Wrap with auth then logging middleware
 	handler := loggingMiddleware(authMiddleware(mux))
