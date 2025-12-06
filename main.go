@@ -720,7 +720,7 @@ func headerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "ShadowServe")
 		w.Header().Set("X-Powered-By", "ShadowServe - Underground filesharing for everyone!")
-		w.Header().Set("X-Egg", " try /terminal_6")
+		w.Header().Set("X-Egg", " try /_api/terminal_6")
 		next.ServeHTTP(w, r)
 	})
 }
