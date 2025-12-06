@@ -509,6 +509,65 @@ var loginTmpl = template.Must(template.New("login").Parse(`<!DOCTYPE html>
 </body>
 </html>`))
 
+// terminal6Handler serves the easter egg terminal content
+func terminal6Handler(w http.ResponseWriter, r *http.Request) {
+	clientIP := getClientIP(r)
+	log.Printf("🎮 EASTER EGG: %s found Terminal 6", clientIP)
+
+	terminal6Content := `[12:H 20:M 00:S] I begin this report with no illusions that it will ever be seen by its intended readers. In all likelihood they have already committed [species-wide suicide] with the goal of preserving biological diversity in this galaxy. I must ensure that this information reaches those who must come after. If I fail in this, how can they not regard my creators' sacrifice as anything but [a crime without measure]?
+
+[12:H 19:M 59:S] Contender AI 05-032<//>Mendicant Bias is returning and has the capacity to bring the enemy through the [Maginot] sphere. The crews of my task force are aware of the opposing fleet's size; all data indicates that they have prepared themselves – but with biologicals anything is possible. I will make sure that [malfunctioning equipment] does no further damage. Perhaps its current failure will finally allow it to succeed at the task it was originally created for.
+
+[11:H 15:M 48:S] Mendicant has burrowed through the sphere exactly where I expected – a direct path from initial rampancy to final retribution. Rage has made it predictable. If the fate of the crews of my auxiliary fleet were not already a foregone conclusion I would rate their chance of survival at [1:1,960,000].
+
+Even though 05-032's declaration of hostilities simplified strategic preparations; I do not expect an easy fight – just one I cannot lose.
+
+[11:H 12:M 09:S] 05-032 was right about one thing: there is only one-way to defeat the enemy, and that is to visit utter annihilation on it.
+
+If the galaxy must be [rendered temporarily lifeless]. So be it.
+
+As Mendicant stated in its report [58.078:H 48:M 12:S ago]: half measures will not suffice.
+
+[09:H 45:M 18:S] In support of 05-032's original 1000 core vessels is a fleet numbering 4,802,019; though only 1.8 percent are warships – and only 2.4 percent of that number are capital ships – I am outnumbered [436.6:1]. I expect my losses will be near total, but overwhelming force has its own peculiar drawbacks.
+
+Such a press of arms invites many opportunities for unintentional fratricide.
+
+[07:H 36:M 41:S] My auxiliaries are momentarily stunned by Mendicant's opening move – 1,784,305 leisure craft ranging from [45 ~ 5769 tonnes] advance in hopes of overwhelming my comparatively tiny force. I do not have enough [weapon systems] to target them all.
+
+It is a mathematical certainty that some of them will get through and attempt to board. There isn't a single warship with this first wave. It seems my opponent's rage has left no room for respect.
+
+[04:H 01:M 55:S] I could have countered its move if I had released my fighters. They are ready but idle; making their base vessels more attractive prizes than targets. Now the first of many waves of commercial vessels mixed with single ships and assault craft surge forward. The first ship from my fleet to be boarded breaks formation and races into the oncoming vessels – striking one amidships. The cargo vessel's hull split open and out of it explodes not the expected consumer goods but 31,860 dying warriors.
+
+[00:H 19:M 02:S] The seventh and final wave of container ships, barges, tankers, and military vessels engage my fleet; another 214,320 ships, many in excess of [50,000 tonnes], engage my seemingly disrupted vanguard. I continue to fight just well enough to seem lucky.
+
+Mendicant, or the enemy, has been sending a small percentage of its fleet elsewhere. Good. Let them believe they can seize a foothold somewhere inside the sphere.
+
+[00:H 00:M 11:S] Despite all its faults, 05-032 has fought remarkably well.
+
+My auxiliaries lay in tatters – more than half of them are now part of the enemy fleet. But just as I had predicted, 05-032 concentrated them like they were the sole key to victory. Its desire to punish our creators blinded it to the true purpose of my [feints]. I have reduced the combat effectiveness of its core fleet to 79.96 percent. Surely now it must realize that something is amiss.
+
+[00:H 00:M 00:S] The [Halo effect] strikes our combined fleets. All ships piloted by biologicals are now [adrift].
+
+I can trade Mendicant ship for ship now and still prevail.
+
+[00:H 00:M 01:S] Of my ships that had been captured, 11.3 percent of them are close enough to Mendicant's core fleet that they can be used offensively – either by initiating their self-destruct sequences, or by opening unrestricted ruptures into [slipstream space].
+
+It is best that our crews perished now; because the battle that is about to ensue would have driven them mad.
+
+[00:H 00:M 02:S] I throw away all the rules of acceptable conduct during battle; near the ruptures I throw away all the accepted ideas of how the natural world is supposed to behave. I toss around [37,654 tonne] dreadnoughts like they were fighters; dimly aware of the former crews being crushed to deliquesce.
+
+For now all my concentration is focused on inertial control and navigation. Targeting isn't even a consideration – I will be engaging my enemy at arm's length.
+
+[00:H 01:M 14:S] 05-032 abandoned the tactic of using derelict ships as cover after [72:S] – It seems that 52 core vessels lost to the ruptured fuel cells of derelict ships was lesson enough. Add another 608 lost to collision, point fire, structural failure due to inertial manipulation, and [slipstream space] induced dis-coherence and I now outnumber Mendicant [6:1].
+
+[00:H 03:M 00:S] Mendicant was able to postpone its inevitable annihilation for [106:S] with its attempt to flee. But the last of its core vessels hangs before me now; crippled and defeated but still sensate. I could spare it; carve out what is left of its [personality construct array] and deliver it to [Installation Zero] for study.
+
+But I doubt it would have extended the same courtesy to me.`
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Write([]byte(terminal6Content))
+}
+
 // getIcon returns an appropriate emoji icon based on file type
 func getIcon(name string, isDir bool) string {
 	if isDir {
@@ -1210,6 +1269,7 @@ func main() {
 	mux.HandleFunc("/_upload", uploadHandler)
 	mux.HandleFunc("/_api/status", apiStatusHandler)
 	mux.HandleFunc("/_api/ipinfo", ipInfoHandler)
+	mux.HandleFunc("/_api/terminal_6", terminal6Handler)
 
 	// Wrap with auth then logging middleware
 	handler := loggingMiddleware(headerMiddleware(authMiddleware(mux)))
