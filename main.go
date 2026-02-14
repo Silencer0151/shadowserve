@@ -72,6 +72,8 @@ var (
 	// failed login attempt tracking
 	failedAttemptsMu sync.Mutex
 	failedAttempts   = make(map[string]int)
+
+	useTLS bool
 )
 
 // generateSelfSignedCert creates an in-memory self-signed TLS certificate
@@ -298,6 +300,9 @@ func ipInfoHandler(w http.ResponseWriter, r *http.Request) {
 		info[k] = v
 	}
 
+	// debug
+	//log.Print(geoData)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
@@ -372,7 +377,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 				Value:    hashForCookie(serverPIN),
 				Path:     "/",
 				HttpOnly: true,
-				Secure:   true,
+				Secure:   useTLS, // Browsers silently ignore Secure cookies on non-HTTPS connections, so this is safe
 				SameSite: http.SameSiteStrictMode,
 			})
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -1209,7 +1214,6 @@ func main() {
 	// Parse arguments
 	port := defaultPort
 	dir := "."
-	useTLS := false
 
 	// Filter out --tls flag and parse positional args
 	var positionalArgs []string
